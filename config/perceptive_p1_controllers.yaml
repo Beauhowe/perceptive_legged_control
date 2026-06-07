@@ -1,0 +1,17 @@
+controller_manager:
+  ros__parameters:
+    update_rate: 500
+
+    joint_state_broadcaster:
+      type: joint_state_broadcaster/JointStateBroadcaster
+
+    perceptive_legged_controller:
+      type: perceptive_legged_control/PerceptiveLeggedController
+
+perceptive_legged_controller:
+  ros__parameters:
+    imuName: base_imu
+    perceptive_terrain_topic: /convex_plane_decomposition_ros/planar_terrain
+    perceptive_height_layer: smooth_planar
+    perceptive_height_offset: 0.0
+    taskFile: /workspace/src/perceptive_legged_control/perceptive_legged_control/config/p1/task.info
