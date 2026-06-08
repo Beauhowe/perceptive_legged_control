@@ -19,6 +19,7 @@
   <depend>grid_map_ros</depend>
   <depend>grid_map_sdf</depend>
   <depend>legged_controllers</depend>
+  <depend>legged_estimation</depend>
   <depend>legged_interface</depend>
   <depend>ocs2_core</depend>
   <depend>ocs2_centroidal_model</depend>

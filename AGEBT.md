@@ -817,3 +817,245 @@ ros2 launch perceptive_legged_control perceptive_stack.launch.py --show-args
 ```bash
 colcon build --packages-select perceptive_legged_control --cmake-args -DCMAKE_BUILD_TYPE=RelWithDebInfo
 ```
+
+
+## 2026-06-08 02:37:25 UTC
+
+补充 P1 仿真验证入口，按当前工程实际使用的预构建高程图链路接入感知 controller。
+
+### 修改内容
+
+- `legged_gazebo/launch/p1_sim.launch.py` 新增 `legged_controller_type` launch 参数，默认仍为 `legged/LeggedController`，不改变原 P1 仿真启动行为。
+- 新增 `p1_dds_joy_tools/launch/p1_perceptive_gait_bridge_sim_test.launch.py`，复用原 P1 DDS/手柄 gait bridge 链路。
+- 新 launch 启动 `convex_plane_decomposition_ros/launch/world_box_terrain.launch.py`，使用预构建 world box 高程图发布 `/convex_plane_decomposition_ros/planar_terrain`。
+- 新 launch 将 `legged_controller` 的 type 切为 `perceptive_legged_control/PerceptiveLeggedController`，controller 名称仍保持 `legged_controller`，避免影响现有 DDS bridge topic/controller 假设。
+- 新 launch 使用 `perceptive_target_trajectories_publisher` 替代原 `legged_target_trajectories_publisher`，避免同一 `/legged_robot_mpc_target` 上出现两个 target publisher。
+
+### 验证命令
+
+已通过：
+
+```bash
+colcon build --packages-select legged_gazebo p1_dds_joy_tools perceptive_legged_control --cmake-args -DCMAKE_BUILD_TYPE=RelWithDebInfo
+ros2 launch p1_dds_joy_tools p1_perceptive_gait_bridge_sim_test.launch.py --show-args
+```
+
+### 运行验证入口
+
+后续可用下面命令启动完整 P1 感知仿真验证：
+
+```bash
+ros2 launch p1_dds_joy_tools p1_perceptive_gait_bridge_sim_test.launch.py
+```
+
+重点检查 `/convex_plane_decomposition_ros/planar_terrain` 是否发布、`PlanarTerrainReceiver` 是否订阅成功、MPC 是否持续求解，以及切换到 `grid_map_sdf` 后足端 clearance 是否稳定。
+
+
+## 2026-06-08 02:44:40 UTC
+
+调整 P1 感知仿真入口的参考高度，默认使用站立参考而不是趴下参考。
+
+### 修改内容
+
+- `p1_perceptive_gait_bridge_sim_test.launch.py` 中新增内部 `controller_reference_file` 选择逻辑。
+- 默认情况下，感知 controller / MPC 的 `reference_file` 使用 `stand_reference_file`，即 `legged_controllers/config/p1/reference.info`。
+- `perceptive_target_trajectories_publisher` 已保持使用 `stand_reference_file`。
+- `lie_down_reference_file` 仍保留给 `lie_down_gait_id` 触发时使用，不影响趴下指令。
+- 若后续需要临时覆盖 controller 参考文件，仍可通过 launch 参数 `reference_file:=...` 显式指定。
+
+### 验证
+
+已通过：
+
+```bash
+colcon build --packages-select p1_dds_joy_tools --cmake-args -DCMAKE_BUILD_TYPE=RelWithDebInfo
+ros2 launch p1_dds_joy_tools p1_perceptive_gait_bridge_sim_test.launch.py --show-args
+```
+
+
+## 2026-06-08 02:56:00 UTC
+
+修正 P1 感知仿真入口的默认参考流程，恢复“先趴下启动，再通过 gait bridge 进入站立和其他步态”的行为。
+
+### 背景
+
+上一版把 `p1_perceptive_gait_bridge_sim_test.launch.py` 中空的 `reference_file` 默认解析为 `stand_reference_file`。这样会让 controller/MPC 一启动就使用站立参考高度，不再默认进入趴下姿态，和 P1 现有 DDS gait bridge 流程不一致。
+
+### 修改内容
+
+- `controller_reference_file` 空值默认改回 `lie_down_reference_file`。
+- `p1_sim.launch.py` 中的感知 controller 启动参考仍默认使用 `reference_lie_down.info`。
+- `p1_gait_dds_bridge` 的 `mpc_reference_file` 同样默认使用趴下参考，保持和 controller 初始状态一致。
+- `stand_reference_file` 仍用于 `stand_gait_id` 触发站立目标。
+- `perceptive_target_trajectories_publisher` 继续使用站立参考生成目标轨迹；感知 terrain/SDF 从启动时在线，切换到站立和后续步态时生效。
+- 如需临时强制 controller 直接使用其他参考，仍可显式传 `reference_file:=...` 覆盖默认行为。
+
+### 验证
+
+已通过：
+
+```bash
+colcon build --packages-select p1_dds_joy_tools --cmake-args -DCMAKE_BUILD_TYPE=RelWithDebInfo
+ros2 launch p1_dds_joy_tools p1_perceptive_gait_bridge_sim_test.launch.py --show-args
+```
+
+
+## 2026-06-08 03:11:58 UTC
+
+修正切换站立时高度不变的问题。
+
+### 问题原因
+
+`PerceptiveSwitchedModelReferenceManager::modifyReferences()` 之前会把所有 target trajectory 的 base z 强制改成：
+
+```text
+terrainZ + comHeight_
+```
+
+其中 `comHeight_` 来自 controller 启动时的 `reference_file`。P1 感知仿真默认用 `reference_lie_down.info` 启动，因此这里读到的是趴下低高度。结果是 DDS bridge 发布的 stand target 虽然使用了 `reference.info` 的站立高度，随后仍会被感知 reference manager 覆盖回低高度。
+
+### 修改内容
+
+- `modifyReferences()` 不再用启动 reference 的 `comHeight_` 覆盖目标高度。
+- 现在保留 target trajectory 自身给出的 base z，并叠加当前 terrain 高度：
+
+```text
+adapted_base_z = terrainZ + target_base_z
+```
+
+这样 `lie_down` 仍保持低参考高度，`stand` 使用 `reference.info` 的站立高度，后续其他步态也保留各自目标高度，只额外接入 terrain 高度修正。
+
+### 验证
+
+已通过：
+
+```bash
+colcon build --packages-select perceptive_legged_control --cmake-args -DCMAKE_BUILD_TYPE=RelWithDebInfo
+```
+
+### 运行时检查
+
+再次切站立时，重点看：
+
+```bash
+ros2 topic echo /legged_robot_mpc_target --once
+```
+
+以及日志中的：
+
+```text
+Published stand posture target: height=...
+```
+
+若 target topic 中 stand target 已经是高 z，但机器人仍不升高，则下一步应检查 controller 是否收到并跟踪该 target。
+
+
+## 2026-06-08 03:26:19 UTC
+
+修正上楼梯时 `/legged_robot/optimizedStateTrajectory` 中 base 轨迹异常的问题。
+
+### 问题原因
+
+上一版修正站立高度时，让 `PerceptiveSwitchedModelReferenceManager` 在 MPC 内统一执行：
+
+```text
+adapted_base_z = terrainZ + target_base_z
+```
+
+但 `perceptive_target_trajectories_publisher` 在 `/cmd_vel` 和 `/move_base_simple/goal` 生成 target 时，已经提前把 `target_base_z` 写成 `terrainHeight + comHeight`。因此上楼梯时 terrain height 会被重复叠加；平地上 `terrainZ = 0`，所以这个问题不明显。
+
+### 修改内容
+
+- `perceptive_target_trajectories_publisher` 输出的 target base z 改为相对地形高度。
+- 当前 state 写入 target trajectory 前，先减去当前位置 terrain height。
+- `/cmd_vel` 目标保持当前相对地形高度，不再提前加目标点 terrain height。
+- `/move_base_simple/goal` 目标使用 `goal.pose.position.z + comHeight` 作为相对高度。
+- terrain height 叠加统一由 `PerceptiveSwitchedModelReferenceManager` 在 MPC 内完成。
+
+### 预期效果
+
+- 平地行为不变。
+- 楼梯/台阶上不再重复叠加 terrain height。
+- `lie_down`、`stand` 和后续步态仍保持各自 reference/target 给出的相对 base 高度。
+
+### 验证
+
+已通过：
+
+```bash
+colcon build --packages-select perceptive_legged_control --cmake-args -DCMAKE_BUILD_TYPE=RelWithDebInfo
+```
+
+
+## 2026-06-08 07:15:00 UTC
+
+修正 P1 感知仿真中 Gazebo 与 RViz 机器人/楼梯位置不一致的问题。
+
+### 问题原因
+
+`p1_perceptive_gait_bridge_sim_test.launch.py` 默认使用 `PerceptiveLeggedController`，其状态估计为 `KalmanFilterEstimate`（假设足端高度为平地 z=0）。仿真中 Gazebo 通过 `/ground_truth/state` 发布真实位姿，两者在接近楼梯时会产生 xy/z 偏差。
+
+`convex_plane_decomposition_ros_world_box_terrain` 的 submap 中心来自 TF `odom -> base`（与 MPC 观测一致），而 Gazebo 显示的是物理真值。因此 RViz 中机器人、地形图、MPC 轨迹与 Gazebo 中的机器人和楼梯会出现空间错位；同时 MPC 会在尚未到达楼梯的 xy 位置提前采样台阶高度，表现为「狗还在地面，轨迹已在楼梯上」。
+
+### 修改内容
+
+- 新增 `PerceptiveLeggedCheaterController`，仿真时订阅 `/ground_truth/state` 作为状态估计（与 `legged/LeggedCheaterController` 一致）。
+- 在 `perceptive_legged_control_plugins.xml` 注册新插件。
+- `p1_perceptive_gait_bridge_sim_test.launch.py` 默认 `legged_controller_type` 改为 `perceptive_legged_control/PerceptiveLeggedCheaterController`。
+- 新增 launch 参数 `legged_controller_type`，实机部署可改回 `PerceptiveLeggedController`。
+
+### 验证
+
+已通过：
+
+```bash
+colcon build --packages-select perceptive_legged_control p1_dds_joy_tools --cmake-args -DCMAKE_BUILD_TYPE=RelWithDebInfo
+```
+
+### 使用说明
+
+重新 source 后启动：
+
+```bash
+ros2 launch p1_dds_joy_tools p1_perceptive_gait_bridge_sim_test.launch.py
+```
+
+RViz Fixed Frame 请保持 `odom`。若仍看到 MPC 轨迹略超前于机体（cmd_vel 1 s 前瞻），属正常前瞻行为；若整体空间仍错位，检查 `/ground_truth/state` 是否在发布。
+
+
+## 2026-06-08 08:05:00 UTC
+
+修正爬楼梯 5~6 节后 MPC 规划过期、机体发散摔倒的问题。
+
+### 问题原因
+
+终端日志显示：
+
+```text
+The requested currentTime is greater than the received plan: 75.57>59.17
+[SafetyChecker] Orientation safety check failed!
+```
+
+根因有两层：
+
+1. `ocs2::MPC_BASE::run()` 在 `currentTime >= solver.getFinalTime()` 时直接 `return false`，MPC 线程不再更新 policy，MRT 持续用过期轨迹（可滞后十余秒），最终姿态失控。
+2. `/cmd_vel` 目标轨迹默认只有约 1 s 有效窗口，长距离爬楼梯时若 DDS 速度命令有间隙，MPC 参考会过期。
+
+### 修改内容
+
+- `ocs2_mpc/MPC_BASE.cpp`：规划过期时设置 `initRun_=true` 并继续求解，而不是永久停止 MPC。
+- `perceptive_target_trajectories_publisher`：新增 20 Hz 定时重发活动 `cmd_vel` 目标；默认 `command_horizon_scale=2.5`（约 2.5 s 前瞻）。
+- `p1_perceptive_gait_bridge_sim_test.launch.py`：新增 `command_horizon_scale`、`target_republish_rate` launch 参数。
+- `config/p1/task.info`：`swingHeight` 从 0.15 提高到 0.18，改善台阶落差处的摆腿 clearance。
+
+### 验证
+
+已通过：
+
+```bash
+colcon build --packages-select ocs2_mpc perceptive_legged_control p1_dds_joy_tools --cmake-args -DCMAKE_BUILD_TYPE=RelWithDebInfo
+```
+
+### 使用建议
+
+爬楼梯时保持 trot 步态并持续给前进速度；若仍偶发摔倒，可尝试放慢 `velocity_x` 或把 `command_horizon_scale` 调到 `3.0`。

@@ -43,7 +43,7 @@ def generate_launch_description():
         ),
         DeclareLaunchArgument("target_frame_id", default_value="odom"),
         DeclareLaunchArgument("base_frame_id", default_value="base"),
-        DeclareLaunchArgument("use_robot_submap", default_value="true"),
+        DeclareLaunchArgument("use_robot_submap", default_value="false"),
         DeclareLaunchArgument("map_padding", default_value="3.0"),
         DeclareLaunchArgument("use_sim_time", default_value="true"),
         DeclareLaunchArgument(

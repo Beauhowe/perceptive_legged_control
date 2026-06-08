@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <memory>
 #include <mutex>
@@ -40,7 +41,8 @@ class PerceptiveTargetTrajectoriesPublisher final : public rclcpp::Node {
     terrainHeightLayer_ = declare_parameter<std::string>("terrain_height_layer", "smooth_planar");
     fallbackHeightLayer_ = declare_parameter<std::string>("fallback_height_layer", "elevation");
     terrainHeightOffset_ = declare_parameter<double>("terrain_height_offset", 0.0);
-    commandHorizonScale_ = declare_parameter<double>("command_horizon_scale", 1.0);
+    commandHorizonScale_ = declare_parameter<double>("command_horizon_scale", 2.5);
+    const double targetRepublishRate = declare_parameter<double>("target_republish_rate", 20.0);
 
     loadData::loadCppDataType(referenceFile, "comHeight", comHeight_);
     loadData::loadEigenMatrix(referenceFile, "defaultJointState", defaultJointState_);
@@ -69,8 +71,18 @@ class PerceptiveTargetTrajectoriesPublisher final : public rclcpp::Node {
         "/cmd_vel", 1,
         [this](const geometry_msgs::msg::Twist::ConstSharedPtr msg) { handleCmdVel(*msg); });
 
-    RCLCPP_INFO(get_logger(), "Perceptive target publisher ready: terrain=%s target=%s_mpc_target", terrainTopic_.c_str(),
-                robotName_.c_str());
+    if (targetRepublishRate > 0.0) {
+      const auto period = std::chrono::duration<double>(1.0 / targetRepublishRate);
+      targetRepublishTimer_ = create_wall_timer(std::chrono::duration_cast<std::chrono::nanoseconds>(period), [this]() {
+        if (!hasActiveCmdVel_) {
+          return;
+        }
+        publishCmdVelTarget(lastCmdVel_);
+      });
+    }
+
+    RCLCPP_INFO(get_logger(), "Perceptive target publisher ready: terrain=%s target=%s_mpc_target horizon_scale=%.2f republish=%.1fHz",
+                terrainTopic_.c_str(), robotName_.c_str(), commandHorizonScale_, targetRepublishRate);
   }
 
  private:
@@ -112,7 +124,7 @@ class PerceptiveTargetTrajectoriesPublisher final : public rclcpp::Node {
     const scalar_array_t timeTrajectory{observation.time, targetReachingTime};
 
     vector_t currentPose = observation.state.segment<6>(6);
-    currentPose(2) = terrainHeight(currentPose(0), currentPose(1), currentPose(2) - comHeight_) + comHeight_;
+    currentPose(2) -= terrainHeight(currentPose(0), currentPose(1), 0.0);
     currentPose(4) = 0.0;
     currentPose(5) = 0.0;
 
@@ -145,14 +157,30 @@ class PerceptiveTargetTrajectoriesPublisher final : public rclcpp::Node {
     Eigen::Quaternion<scalar_t> q(pose.pose.orientation.w, pose.pose.orientation.x, pose.pose.orientation.y, pose.pose.orientation.z);
     vector_t targetPose(6);
     targetPose << pose.pose.position.x, pose.pose.position.y, 0.0, q.toRotationMatrix().eulerAngles(0, 1, 2).z(), 0.0, 0.0;
-    targetPose(2) = terrainHeight(targetPose(0), targetPose(1), pose.pose.position.z) + comHeight_;
+    targetPose(2) = pose.pose.position.z + comHeight_;
 
     const vector_t currentPose = observation.state.segment<6>(6);
     const double targetReachingTime = observation.time + estimateTimeToTarget(targetPose - currentPose);
     targetPublisher_->publishTargetTrajectories(poseToTargetTrajectories(targetPose, observation, targetReachingTime));
   }
 
+  static bool isZeroCmdVel(const geometry_msgs::msg::Twist& msg) {
+    constexpr double kEps = 1e-6;
+    return std::abs(msg.linear.x) < kEps && std::abs(msg.linear.y) < kEps && std::abs(msg.linear.z) < kEps &&
+           std::abs(msg.angular.z) < kEps;
+  }
+
   void handleCmdVel(const geometry_msgs::msg::Twist& msg) {
+    if (isZeroCmdVel(msg)) {
+      hasActiveCmdVel_ = false;
+      return;
+    }
+    lastCmdVel_ = msg;
+    hasActiveCmdVel_ = true;
+    publishCmdVelTarget(msg);
+  }
+
+  void publishCmdVelTarget(const geometry_msgs::msg::Twist& msg) {
     const auto observation = latestObservation();
     if (!hasObservation(observation)) {
       return;
@@ -168,7 +196,8 @@ class PerceptiveTargetTrajectoriesPublisher final : public rclcpp::Node {
     vector_t targetPose(6);
     targetPose << currentPose(0) + cmdVelRot(0) * horizon, currentPose(1) + cmdVelRot(1) * horizon, 0.0,
         currentPose(3) + cmdVel(3) * horizon, 0.0, 0.0;
-    targetPose(2) = terrainHeight(targetPose(0), targetPose(1), currentPose(2) - comHeight_) + comHeight_;
+    const scalar_t currentRelativeHeight = currentPose(2) - terrainHeight(currentPose(0), currentPose(1), 0.0);
+    targetPose(2) = std::max(currentRelativeHeight, comHeight_);
 
     targetPublisher_->publishTargetTrajectories(
         poseToTargetTrajectories(targetPose, observation, observation.time + horizon, cmdVelRot));
@@ -183,8 +212,10 @@ class PerceptiveTargetTrajectoriesPublisher final : public rclcpp::Node {
   scalar_t comHeight_{0.45};
   scalar_t timeToTarget_{1.0};
   double terrainHeightOffset_{0.0};
-  double commandHorizonScale_{1.0};
+  double commandHorizonScale_{2.5};
   vector_t defaultJointState_{vector_t::Zero(12)};
+  geometry_msgs::msg::Twist lastCmdVel_;
+  bool hasActiveCmdVel_{false};
 
   mutable std::mutex observationMutex_;
   mutable std::mutex terrainMutex_;
@@ -195,6 +226,7 @@ class PerceptiveTargetTrajectoriesPublisher final : public rclcpp::Node {
   rclcpp::Subscription<convex_plane_decomposition_msgs::msg::PlanarTerrain>::SharedPtr terrainSub_;
   rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr goalSub_;
   rclcpp::Subscription<geometry_msgs::msg::Twist>::SharedPtr cmdVelSub_;
+  rclcpp::TimerBase::SharedPtr targetRepublishTimer_;
   tf2_ros::Buffer tfBuffer_;
   std::unique_ptr<tf2_ros::TransformListener> tfListener_;
 };

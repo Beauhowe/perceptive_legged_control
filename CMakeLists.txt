@@ -16,6 +16,7 @@ find_package(grid_map_msgs REQUIRED)
 find_package(grid_map_ros REQUIRED)
 find_package(grid_map_sdf REQUIRED)
 find_package(legged_controllers REQUIRED)
+find_package(legged_estimation REQUIRED)
 find_package(legged_interface REQUIRED)
 find_package(ocs2_core REQUIRED)
 find_package(ocs2_centroidal_model REQUIRED)
@@ -47,6 +48,7 @@ set(PACKAGE_DEPENDENCIES
   grid_map_ros
   grid_map_sdf
   legged_controllers
+  legged_estimation
   legged_interface
   ocs2_core
   ocs2_centroidal_model
@@ -68,6 +70,7 @@ add_library(perceptive_legged_controller SHARED
   src/interface/ConvexRegionSelector.cpp
   src/synchronized_module/PlanarTerrainReceiver.cpp
   src/controller/PerceptiveLeggedController.cpp
+  src/controller/PerceptiveLeggedCheaterController.cpp
   src/interface/PerceptiveLeggedInterface.cpp
   src/interface/PerceptiveLeggedPrecomputation.cpp
   src/constraint/FootPlacementConstraint.cpp

@@ -33,16 +33,24 @@ void PerceptiveSwitchedModelReferenceManager::modifyReferences(scalar_t initTime
 
   const auto& map = convexRegionSelectorPtr_->getPlanarTerrainPtr()->gridMap;
   if (map.exists("smooth_planar")) {
+    const TargetTrajectories* relativeTargetTrajectories = &targetTrajectories;
+    if (hasCachedTargetTrajectories_ && targetTrajectories == lastAdaptedTargetTrajectories_) {
+      relativeTargetTrajectories = &relativeTargetTrajectories_;
+    } else {
+      relativeTargetTrajectories_ = targetTrajectories;
+      relativeTargetTrajectories = &relativeTargetTrajectories_;
+    }
+
     TargetTrajectories newTargetTrajectories;
     const size_t nodeNum = 11;
     for (size_t i = 0; i < nodeNum; ++i) {
       const scalar_t time = initTime + static_cast<scalar_t>(i) * timeHorizon / static_cast<scalar_t>(nodeNum - 1);
-      vector_t state = targetTrajectories.getDesiredState(time);
-      vector_t input = targetTrajectories.getDesiredInput(time);
+      vector_t state = relativeTargetTrajectories->getDesiredState(time);
+      vector_t input = relativeTargetTrajectories->getDesiredInput(time);
 
       vector3_t pos = centroidal_model::getBasePose(state, info_).head(3);
       const grid_map::Position position2d(pos.x(), pos.y());
-      const scalar_t terrainZ = mapHeight(map, position2d, pos.z());
+      const scalar_t terrainZ = mapHeight(map, position2d, 0.0);
 
       const scalar_t step = 0.3;
       grid_map::Vector3 normalVector;
@@ -60,13 +68,15 @@ void PerceptiveSwitchedModelReferenceManager::modifyReferences(scalar_t initTime
       R << std::cos(yaw), -std::sin(yaw), 0.0, std::sin(yaw), std::cos(yaw), 0.0, 0.0, 0.0, 1.0;
       const vector3_t bodyNormal = R.transpose() * normalVector;
       centroidal_model::getBasePose(state, info_)(4) = std::atan2(bodyNormal.x(), bodyNormal.z());
-      centroidal_model::getBasePose(state, info_)(2) = terrainZ + comHeight_;
+      centroidal_model::getBasePose(state, info_)(2) = terrainZ + pos.z();
 
       newTargetTrajectories.timeTrajectory.push_back(time);
       newTargetTrajectories.stateTrajectory.push_back(state);
       newTargetTrajectories.inputTrajectory.push_back(input);
     }
     targetTrajectories = std::move(newTargetTrajectories);
+    lastAdaptedTargetTrajectories_ = targetTrajectories;
+    hasCachedTargetTrajectories_ = true;
   }
 
   convexRegionSelectorPtr_->update(modeSchedule, initTime, initState, targetTrajectories);

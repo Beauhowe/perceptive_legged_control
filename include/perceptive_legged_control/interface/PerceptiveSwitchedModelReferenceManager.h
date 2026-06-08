@@ -55,6 +55,9 @@ class PerceptiveSwitchedModelReferenceManager : public ocs2::legged_robot::Switc
   std::shared_ptr<ConvexRegionSelector> convexRegionSelectorPtr_;
   std::unique_ptr<ocs2::EndEffectorKinematics<ocs2::scalar_t>> endEffectorKinematicsPtr_;
   ocs2::scalar_t comHeight_;
+  ocs2::TargetTrajectories relativeTargetTrajectories_;
+  ocs2::TargetTrajectories lastAdaptedTargetTrajectories_;
+  bool hasCachedTargetTrajectories_{false};
 };
 
 }  // namespace perceptive_legged_control

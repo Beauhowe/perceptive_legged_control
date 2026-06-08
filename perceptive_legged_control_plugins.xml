@@ -6,4 +6,11 @@
       Legged controller variant that feeds convex planar terrain height into the OCS2 swing trajectory planner.
     </description>
   </class>
+  <class name="perceptive_legged_control/PerceptiveLeggedCheaterController"
+         type="perceptive_legged_control::PerceptiveLeggedCheaterController"
+         base_class_type="controller_interface::ControllerInterface">
+    <description>
+      Perceptive legged controller for simulation that uses /ground_truth/state instead of the Kalman filter.
+    </description>
+  </class>
 </library>
