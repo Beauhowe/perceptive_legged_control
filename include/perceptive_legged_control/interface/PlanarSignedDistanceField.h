@@ -4,6 +4,7 @@
 #include <string>
 
 #include <grid_map_core/GridMap.hpp>
+#include <grid_map_sdf/SignedDistanceField.hpp>
 #include <ocs2_core/Types.h>
 #include <ocs2_legged_robot/common/Types.h>
 
@@ -19,11 +20,10 @@ class PlanarSignedDistanceField {
   ocs2::legged_robot::vector3_t derivative(const ocs2::legged_robot::vector3_t& position) const;
 
  private:
-  ocs2::scalar_t heightAt(const grid_map::Position& position, ocs2::scalar_t fallback) const;
-
   mutable std::mutex mutex_;
   grid_map::GridMap gridMap_;
   std::string layer_{"elevation"};
+  grid_map::SignedDistanceField sdf_;
   bool hasMap_{false};
 };
 

@@ -14,6 +14,7 @@ find_package(geometry_msgs REQUIRED)
 find_package(grid_map_core REQUIRED)
 find_package(grid_map_msgs REQUIRED)
 find_package(grid_map_ros REQUIRED)
+find_package(grid_map_sdf REQUIRED)
 find_package(legged_controllers REQUIRED)
 find_package(legged_interface REQUIRED)
 find_package(ocs2_core REQUIRED)
@@ -33,6 +34,7 @@ find_package(tf2_ros REQUIRED)
 find_package(visualization_msgs REQUIRED)
 find_package(Boost REQUIRED COMPONENTS filesystem system log log_setup)
 find_package(Eigen3 3.3 REQUIRED NO_MODULE)
+find_package(PCL REQUIRED COMPONENTS common)
 
 set(PACKAGE_DEPENDENCIES
   controller_interface
@@ -43,6 +45,7 @@ set(PACKAGE_DEPENDENCIES
   grid_map_core
   grid_map_msgs
   grid_map_ros
+  grid_map_sdf
   legged_controllers
   legged_interface
   ocs2_core
@@ -80,8 +83,10 @@ target_include_directories(perceptive_legged_controller
   PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
     $<INSTALL_INTERFACE:include>
+    ${PCL_INCLUDE_DIRS}
 )
 ament_target_dependencies(perceptive_legged_controller ${PACKAGE_DEPENDENCIES})
+target_link_libraries(perceptive_legged_controller ${PCL_LIBRARIES})
 target_compile_options(perceptive_legged_controller PUBLIC ${OCS2_CXX_FLAGS})
 if(ocs2_sphere_approximation_FOUND)
   target_sources(perceptive_legged_controller PRIVATE
