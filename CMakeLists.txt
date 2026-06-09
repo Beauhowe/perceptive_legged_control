@@ -29,6 +29,7 @@ find_package(ocs2_sphere_approximation QUIET)
 find_package(ocs2_ros_interfaces REQUIRED)
 find_package(pluginlib REQUIRED)
 find_package(rclcpp REQUIRED)
+find_package(rcl_interfaces REQUIRED)
 find_package(tf2 REQUIRED)
 find_package(tf2_geometry_msgs REQUIRED)
 find_package(tf2_ros REQUIRED)
@@ -60,6 +61,7 @@ set(PACKAGE_DEPENDENCIES
   ocs2_ros_interfaces
   pluginlib
   rclcpp
+  rcl_interfaces
   tf2
   tf2_geometry_msgs
   tf2_ros
@@ -105,9 +107,14 @@ add_executable(perceptive_target_trajectories_publisher src/PerceptiveTargetTraj
 ament_target_dependencies(perceptive_target_trajectories_publisher ${PACKAGE_DEPENDENCIES})
 target_link_libraries(perceptive_target_trajectories_publisher Eigen3::Eigen)
 
+add_executable(perceptive_session_logger src/PerceptiveSessionLogger.cpp)
+ament_target_dependencies(perceptive_session_logger ${PACKAGE_DEPENDENCIES})
+target_link_libraries(perceptive_session_logger Boost::filesystem)
+
 install(TARGETS
   perceptive_legged_controller
   perceptive_target_trajectories_publisher
+  perceptive_session_logger
   ARCHIVE DESTINATION lib
   LIBRARY DESTINATION lib
   RUNTIME DESTINATION lib/${PROJECT_NAME}

@@ -340,7 +340,7 @@ footPlacement
 
 CollisionParam
 {
-  enablefootCollision                     true
+  enablefootCollision                     false
   enableSphereSdfConstraint               false
 
   footCollisionPenaltyMu                  1e-2
