@@ -147,11 +147,14 @@ void PerceptiveLeggedInterface::setupReferenceManager(const std::string& taskFil
       getEeKinematicsPtr(modelSettings_.contactNames3DoF, "ALL_FOOT");
   auto convexRegionSelector = std::make_shared<ConvexRegionSelector>(centroidalModelInfo_, planarTerrainPtr_, *eeKinematicsPtr, numVertices_);
 
+  boost::property_tree::ptree referencePtree;
+  boost::property_tree::read_info(referenceFile, referencePtree);
   ocs2::scalar_t comHeight = 0.0;
   ocs2::loadData::loadCppDataType(referenceFile, "comHeight", comHeight);
+  const ocs2::scalar_t locomotionComHeight = referencePtree.get<ocs2::scalar_t>("locomotionComHeight", comHeight);
   referenceManagerPtr_ = std::make_shared<PerceptiveSwitchedModelReferenceManager>(
       centroidalModelInfo_, loadGaitSchedule(referenceFile, verbose), std::move(swingTrajectoryPlanner), std::move(convexRegionSelector),
-      *eeKinematicsPtr, comHeight);
+      *eeKinematicsPtr, locomotionComHeight);
 }
 
 void PerceptiveLeggedInterface::setupPreComputation(const std::string&, const std::string&, const std::string&, bool) {

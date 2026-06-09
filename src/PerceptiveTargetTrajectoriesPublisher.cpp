@@ -1,5 +1,7 @@
 #include <algorithm>
 #include <chrono>
+#include <boost/property_tree/info_parser.hpp>
+#include <boost/property_tree/ptree.hpp>
 #include <cmath>
 #include <memory>
 #include <mutex>
@@ -14,7 +16,6 @@
 #include <ocs2_core/misc/LoadData.h>
 #include <ocs2_mpc/SystemObservation.h>
 #include <ocs2_msgs/msg/mpc_observation.hpp>
-#include <ocs2_robotic_tools/common/RotationTransforms.h>
 #include <ocs2_ros_interfaces/command/TargetTrajectoriesRosPublisher.h>
 #include <ocs2_ros_interfaces/common/RosMsgConversions.h>
 #include <rclcpp/rclcpp.hpp>
@@ -44,7 +45,11 @@ class PerceptiveTargetTrajectoriesPublisher final : public rclcpp::Node {
     commandHorizonScale_ = declare_parameter<double>("command_horizon_scale", 2.5);
     const double targetRepublishRate = declare_parameter<double>("target_republish_rate", 20.0);
 
-    loadData::loadCppDataType(referenceFile, "comHeight", comHeight_);
+    boost::property_tree::ptree referencePtree;
+    boost::property_tree::read_info(referenceFile, referencePtree);
+    scalar_t comHeight = 0.0;
+    loadData::loadCppDataType(referenceFile, "comHeight", comHeight);
+    locomotionComHeight_ = referencePtree.get<scalar_t>("locomotionComHeight", comHeight);
     loadData::loadEigenMatrix(referenceFile, "defaultJointState", defaultJointState_);
     loadData::loadCppDataType(referenceFile, "targetRotationVelocity", targetRotationVelocity_);
     loadData::loadCppDataType(referenceFile, "targetDisplacementVelocity", targetDisplacementVelocity_);
@@ -157,7 +162,7 @@ class PerceptiveTargetTrajectoriesPublisher final : public rclcpp::Node {
     Eigen::Quaternion<scalar_t> q(pose.pose.orientation.w, pose.pose.orientation.x, pose.pose.orientation.y, pose.pose.orientation.z);
     vector_t targetPose(6);
     targetPose << pose.pose.position.x, pose.pose.position.y, 0.0, q.toRotationMatrix().eulerAngles(0, 1, 2).z(), 0.0, 0.0;
-    targetPose(2) = pose.pose.position.z + comHeight_;
+    targetPose(2) = pose.pose.position.z + locomotionComHeight_;
 
     const vector_t currentPose = observation.state.segment<6>(6);
     const double targetReachingTime = observation.time + estimateTimeToTarget(targetPose - currentPose);
@@ -187,17 +192,19 @@ class PerceptiveTargetTrajectoriesPublisher final : public rclcpp::Node {
     }
 
     const vector_t currentPose = observation.state.segment<6>(6);
-    const Eigen::Matrix<scalar_t, 3, 1> zyx = currentPose.tail(3);
+    const scalar_t yaw = currentPose(3);
     vector_t cmdVel = vector_t::Zero(4);
     cmdVel << msg.linear.x, msg.linear.y, msg.linear.z, msg.angular.z;
-    vector_t cmdVelRot = getRotationMatrixFromZyxEulerAngles(zyx) * cmdVel.head(3);
+    vector_t cmdVelRot = vector_t::Zero(3);
+    cmdVelRot(0) = std::cos(yaw) * cmdVel(0) - std::sin(yaw) * cmdVel(1);
+    cmdVelRot(1) = std::sin(yaw) * cmdVel(0) + std::cos(yaw) * cmdVel(1);
 
     const double horizon = timeToTarget_ * commandHorizonScale_;
     vector_t targetPose(6);
     targetPose << currentPose(0) + cmdVelRot(0) * horizon, currentPose(1) + cmdVelRot(1) * horizon, 0.0,
         currentPose(3) + cmdVel(3) * horizon, 0.0, 0.0;
     const scalar_t currentRelativeHeight = currentPose(2) - terrainHeight(currentPose(0), currentPose(1), 0.0);
-    targetPose(2) = std::max(currentRelativeHeight, comHeight_);
+    targetPose(2) = std::max(currentRelativeHeight, locomotionComHeight_);
 
     targetPublisher_->publishTargetTrajectories(
         poseToTargetTrajectories(targetPose, observation, observation.time + horizon, cmdVelRot));
@@ -209,7 +216,7 @@ class PerceptiveTargetTrajectoriesPublisher final : public rclcpp::Node {
   std::string fallbackHeightLayer_;
   scalar_t targetDisplacementVelocity_{0.5};
   scalar_t targetRotationVelocity_{1.57};
-  scalar_t comHeight_{0.45};
+  scalar_t locomotionComHeight_{0.45};
   scalar_t timeToTarget_{1.0};
   double terrainHeightOffset_{0.0};
   double commandHorizonScale_{2.5};

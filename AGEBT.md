@@ -1086,3 +1086,227 @@ colcon build --packages-select ocs2_mpc perceptive_legged_control p1_dds_joy_too
 这更像代码/集成层面的问题，而不是单纯速度或参数问题。`PerceptiveTargetTrajectoriesPublisher` 发布的 cmd_vel 目标高度是相对地形高度，后续需要 `PerceptiveSwitchedModelReferenceManager` 根据 `smooth_planar`/`elevation` 地形图再补成绝对高度和坡面 pitch。如果控制器端没有收到有效地形、地形 frame/layer 不匹配、或地形高度没有覆盖楼梯区域，MPC 就会继续使用接近平地的目标高度，导致实际楼梯高度和目标高度脱节。
 
 需要优先排查目标发布器、地形 topic/layer/frame、控制器内 reference adaptation 是否都在同一坐标系和同一高度语义下工作。
+
+
+## 2026-06-09 13:52:36 UTC
+
+根据“应该怎么修改可以修复爬楼梯不稳定”的问题，实施一个代码层面的最小修复。
+
+### 修改内容
+
+- `src/PerceptiveTargetTrajectoriesPublisher.cpp`：`cmd_vel` 目标生成时，线速度只按 yaw 从机体系旋到世界系，不再使用完整 roll/pitch/yaw 姿态旋转。
+- 移除不再使用的 `ocs2_robotic_tools/common/RotationTransforms.h` include。
+
+### 原因
+
+`cmd_vel` 是平面导航命令。旧实现使用完整姿态旋转 `linear.x/y/z`，当机器人在楼梯上有明显 pitch/roll 时，前进速度会被错误投影出垂直速度分量，导致 MPC 目标速度包含非预期的 `v_z`，容易在台阶上放大俯仰和高度振荡。
+
+### 验证
+
+已通过：
+
+```bash
+colcon build --packages-select perceptive_legged_control --cmake-args -DCMAKE_BUILD_TYPE=RelWithDebInfo
+```
+
+### 后续建议
+
+重新跑楼梯场景后，对比最新 `observation.csv` 中 `vcom_z`、pitch、roll 是否明显收敛；若仍不稳，再继续排查控制器内部地形适配后的最终参考高度是否与实际台阶高度一致。
+
+
+## 2026-06-09 13:57:15 UTC
+
+读取最新 `/workspace/mpc_logs/session_20260609_135322`，分析 yaw-only `cmd_vel` 修复后仍摔倒的原因；本次未修改控制代码。
+
+### 诊断摘要
+
+- 新会话在 `mpc_time=26.466s` 结束，末尾 roll 约 `89.85deg`，触发 `[Legged Controller] Safety check failed`。
+- 与上一轮不同，这次 `base_z` 最大约 `1.263m`，没有再冲到 `2.19m`，说明上一轮速度投影修复减轻了垂直发散。
+- 主要异常变成侧向偏移：机器人从 `y≈0.02` 被带到 `y≈-1.52` 后才开始向前走，摔倒时达到 `y≈-2.51`。
+- `cmd_vel.log` 显示早期存在较大横向命令 `linear_y=-0.5`，后续前进时仍有 `linear_y≈-0.08`。
+- `empty_world.world` 中楼梯每级尺寸为 `0.30 x 1.20 x ...`，中心 `y=0`，有效台阶宽度约 `[-0.6, 0.6]`；最新轨迹已经远离台阶区域。
+
+### 初步判断
+
+这次摔倒主要不是高度目标问题，而是侧向命令/目标规划没有楼梯通道约束，机器人先横移出楼梯宽度，再在台阶边缘或台阶外侧继续前进，导致大 roll 翻倒。
+
+### 建议
+
+短期先禁用或强限幅 `cmd_vel.linear_y`，爬楼梯时保持 `y` 接近 0；中期在目标发布器或 gait bridge 中增加楼梯模式下的横向通道约束，例如限制目标 `base_y` 到台阶可通行范围内，并对 `linear_y` 加死区/限幅。
+
+
+## 2026-06-09 13:59:51 UTC
+
+根据最新日志和用户反馈，重新判断 `PerceptiveTargetTrajectoriesPublisher.cpp` 中 yaw-only `cmd_vel` 速度旋转修改的作用；本次未修改代码。
+
+### 判断更新
+
+最新 `session_20260609_135322` 显示摔倒主因不再指向速度投影本身。yaw-only 修改可以避免 pitch/roll 将平面 `cmd_vel` 投影出非预期垂直速度，但它不是本轮摔倒的主要原因。
+
+当前更主要的问题是横向目标/命令把机器人带出楼梯通道：楼梯宽度约 `y in [-0.6, 0.6]`，而日志中机器人在爬楼梯前已偏到 `y≈-1.52`，摔倒时约 `y≈-2.51`。后续修复重点应放在楼梯模式下限制 `linear_y` 或约束目标 `base_y`，以及验证地形/落脚区域约束是否覆盖台阶边界。
+
+## 2026-06-09 14:04:37 UTC
+- 分析最新日志 `mpc_logs/session_20260609_135322`：速度 yaw-only 修改后仍摔倒，`base_z` 峰值约 1.263 m，roll 接近 90 deg，最终 y 约 -2.507，说明主因不像是线速度被 pitch/roll 投影到竖直方向。
+- 对比世界模型楼梯宽度：楼梯 y 方向有效范围约 [-0.6, 0.6]，但最新轨迹在摔倒前已到 y≈-1.52，最终 y≈-2.51，目标轨迹也跟着向楼梯外侧走，属于目标/约束层面允许机器人离开可落脚区域。
+- 参考 `/workspace/legged_perceptive`：参考工程的 `PerceptiveLeggedReferenceManager` 会按 terrain normal 设置 pitch，并用 `terrain + comHeight / cos(pitch)` 设置 base z；当前工程 `PerceptiveSwitchedModelReferenceManager` 使用 `terrainZ + pos.z()`，依赖上游 target z 为相对高度，语义更脆弱，可能在台阶/坡面上给出偏低 body height。
+- 当前 `config/p1/task.info` 中 `footPlacement.enableCBF=false`、`enableSwingCBF=false`、`CollisionParam.enablefootCollision=false`，硬约束/CBF/碰撞保护关闭；建议优先限制楼梯模式 lateral target/cmd_vel，启用并调试 foot placement CBF/swing CBF，再考虑把高度参考逻辑对齐参考工程。
+
+## 2026-06-09 14:18:51 UTC
+- 用户已撤销 `PerceptiveTargetTrajectoriesPublisher.cpp` 中关于 cmd_vel 速度旋转的修改。
+- 重新确认当前仓库状态：`src/PerceptiveTargetTrajectoriesPublisher.cpp` 无 diff，当前仅 `AGEBT.md` 处于修改状态。
+- 当前代码仍使用 `getRotationMatrixFromZyxEulerAngles(zyx)` 对 cmd_vel 线速度按完整 RPY 旋转。
+- 重新确认 `config/p1/task.info`：`footPlacement.enableCBF=false`、`enableSwingCBF=false`、`CollisionParam.enablefootCollision=false`、`enableSphereSdfConstraint=false`，后续排查重点应转向楼梯横向目标越界与足端/碰撞约束保护不足。
+
+## 2026-06-09 14:20:30 UTC
+- 解释 `terrain + comHeight / cos(pitch)`：`terrain` 是目标位置处地形高度，`comHeight` 是期望质心/机身相对地面的标称高度，`pitch` 是根据地形法向估计出的机身俯仰角，`cos(pitch)` 用于把沿机身/地形法向的高度换算成世界系 z 方向高度。
+- 说明该公式的目的：在坡面或台阶边缘使 base z 随 pitch 做投影补偿，避免机器人倾斜时世界系 z 参考过低。
+
+## 2026-06-09 14:23:13 UTC
+- 解释 `terrainZ + pos.z()`：`terrainZ` 是目标 xy 位置采样到的地形高度，`pos.z()` 在当前工程语境下应表示相对地形的 base/COM 高度，因此两者相加得到世界系 base z。
+- 强调该公式依赖 `pos.z()` 的语义：若 `pos.z()` 已经是世界系高度，会导致重复加地形；若 `pos.z()` 只是 raw target 的 0 或过低值，则会导致机身高度参考过低。与参考工程的 `terrain + comHeight / cos(pitch)` 相比，它不会自动根据 pitch 做高度投影补偿。
+
+## 2026-06-09 14:25:11 UTC
+- 澄清 `terrain` 和 `terrainZ` 在当前讨论中语义相同，都是目标 xy 位置处采样得到的地形世界系 z 高度；两者差异主要是变量命名/代码上下文。
+- 因此两个公式的核心差异不在 terrain 项，而在第二项：`comHeight / cos(pitch)` 是固定标称高度加 pitch 投影补偿，`pos.z()` 则依赖 target 中 z 分量已经被正确表达为相对地形高度。
+
+## 2026-06-09 14:26:20 UTC
+- 追踪 `terrainZ + pos.z()` 中 `pos.z()` 的来源：在 `PerceptiveSwitchedModelReferenceManager::modifyReferences()` 中，`pos` 来自 `centroidal_model::getBasePose(state, info_).head(3)`，而 `state` 来自 `relativeTargetTrajectories->getDesiredState(time)`。
+- 因此 `pos.z()` 实际由上游目标轨迹赋值：`PerceptiveTargetTrajectoriesPublisher::poseToTargetTrajectories()` 将 `targetPose` 写入 `stateTrajectory[1]`，cmd_vel 模式下 `targetPose(2)=max(currentPose(2)-terrainHeight, comHeight_)`，goal 模式下 `targetPose(2)=pose.pose.position.z + comHeight_`。
+- 说明当前工程中 `pos.z()` 被 reference manager 当成“相对地形的 base/COM 高度”使用，并在 reference manager 内部再加一次 `terrainZ` 转成世界系高度。
+
+## 2026-06-09 14:32:52 UTC
+- 用户说明控制架构存在两个 reference/default 状态：默认 `liedown` 用于位控趴下，另有站立状态；在 `liedown` 和 `stand` 位控状态下不应有 MPC 控制接入，只有切换到 trot 或其他步态时 MPC 才接入。
+- 分析结论：如果感知 MPC 的高度适配改为 `terrain + comHeight / cos(pitch)`，其中 `comHeight` 应绑定 MPC-active 的站立/行走标称 body height，而不是默认趴下高度。
+- 当前配置检查：`perceptive_target.yaml` 的 `referenceFile` 指向 `legged_controllers/config/p1/reference.info`，其中 `comHeight=0.58`；`PerceptiveLeggedInterface::setupReferenceManager()` 也从同一个 `referenceFile` 读取 `comHeight` 注入 `PerceptiveSwitchedModelReferenceManager`。
+- 后续设计注意：若默认 reference 切换为 `liedown` 文件，不能直接用该文件的 `comHeight` 做 terrain height compensation，应单独读取站立/MPC reference height 或增加明确参数，例如 `mpcComHeight`/`standingComHeight`。
+
+## 2026-06-09 14:34:09 UTC
+- 评估用户提出的修改方向：在感知 MPC 接入阶段使用站立/行走参考高度作为 `comHeight`，并用于 `terrain + comHeight / cos(pitch)` 的高度适配是合理的。
+- 建议实现方式：不要复用默认 `liedown` reference 的高度；应新增或明确使用 `mpcComHeight`/`standingComHeight`/`locomotionComHeight`，让 MPC-active 的 terrain compensation 独立绑定站立/步态高度。
+- 注意条件：该高度适配只应在 trot/walk/stair 等 MPC 接入状态生效；`liedown` 和纯 stand 位控状态不应由 MPC reference manager 接管控制。
+
+## 2026-06-09 14:37:14 UTC
+- 按用户确认实施修改：感知 MPC 高度适配从 `terrainZ + pos.z()` 改为 `terrainZ + locomotionComHeight / cos(pitch)`，避免依赖 target 中 `pos.z()` 的相对高度语义。
+- 在 `PerceptiveSwitchedModelReferenceManager` 中将成员语义改为 `locomotionComHeight_`，并用地形法向计算出的 `pitch` 同时设置 base pitch 和 base z 投影补偿。
+- 在 `PerceptiveLeggedInterface::setupReferenceManager()` 中新增 `locomotionComHeight` 读取逻辑：若 reference 文件未配置该项，则回退使用原 `comHeight`，保持向后兼容。
+- 在 `/workspace/src/legged_control/legged_controllers/config/p1/reference.info` 和运行时安装路径 `/workspace/install/legged_controllers/share/legged_controllers/config/p1/reference.info` 中加入 `locomotionComHeight 0.58`，明确 MPC-active 站立/行走高度，不与默认 `liedown` 高度混用。
+- 验证：执行 `colcon build --packages-select perceptive_legged_control --cmake-args -DCMAKE_BUILD_TYPE=RelWithDebInfo`，构建通过。
+
+## 2026-06-09 14:39:31 UTC
+- 进一步补全专用 `locomotionComHeight`：`PerceptiveTargetTrajectoriesPublisher` 现在也从 reference 文件读取 `locomotionComHeight`，若未配置则回退 `comHeight`。
+- raw target 生成中的 goal/cmd_vel 高度也改为使用 `locomotionComHeight_`：goal 模式为 `pose.pose.position.z + locomotionComHeight_`，cmd_vel 模式为 `max(currentRelativeHeight, locomotionComHeight_)`。
+- 这样 target publisher 与 `PerceptiveSwitchedModelReferenceManager` 的高度语义一致，都使用 MPC-active 的站立/行走高度，而不是默认 `liedown` 高度。
+- 验证：再次执行 `colcon build --packages-select perceptive_legged_control --cmake-args -DCMAKE_BUILD_TYPE=RelWithDebInfo`，构建通过。
+- 注意：`/workspace/src/legged_control/legged_controllers/config/p1/reference_lie_down.info` 当前也处于修改状态，但本次未修改该文件。
+
+
+## 2026-06-09 15:06:54 UTC
+- 分析最新日志 `/workspace/mpc_logs/session_20260609_145856`：楼梯失稳前实际接触 mode 从 trot 的 `9/6` 逐渐变成 `13/14/2/1/5/12/0` 等组合，说明预期落地脚未稳定接触；随后 roll 达到 `1.57 rad`，触发 SafetyChecker 的 `±pi/2` 阈值。
+- `cmd_vel` 在失稳前保持 `linear_y=0`、`angular_z=0`，因此本轮不是手柄横向输入直接造成；用户观察到的四足踏地/摆动越来越不规律与日志一致。
+- 对比 NACL：其配置加载默认启用 FootPlacement CBF、SwingFootPlacement CBF 和 FootCollision；当前 P1 感知配置此前只启用普通 FootPlacement 软约束。
+- 仅修改感知专用 `config/p1/task.info`：设置 `footPlacement.enableCBF=true`、`footPlacement.enableSwingCBF=true`、`CollisionParam.enablefootCollision=true`；`enableSphereSdfConstraint=false` 保持不变。
+- 未修改原始 `legged_control`、Gazebo world、gait 或手柄控制代码。
+- 验证：`colcon build --base-paths /workspace/src --packages-select perceptive_legged_control --symlink-install` 构建通过；Gazebo 同路径动态复测尚待执行。
+
+
+## 2026-06-09 15:13:50 UTC
+- 分析最新日志 `/workspace/mpc_logs/session_20260609_150816`：失稳前接触 mode 逐渐不规则，base 竖直速度振荡并最终侧翻；该会话还包含较大的前进、横移和转向输入，机器人明显偏离窄楼梯通道，日志未出现 MPC infeasible 或约束求解告警。
+- 定位到 `PerceptiveTargetTrajectoriesPublisher` 使用完整 roll/pitch/yaw 旋转 `cmd_vel` 线速度；楼梯上的 pitch/roll 会把平面手柄输入投影成非预期目标 `v_z`，可能加剧摆腿与接触紊乱。
+- 对比 NACL 感知专用轨迹生成：其使用 heading/lateral/yaw-rate 平面命令，由地形生成器单独适配高度和姿态，旧的完整 RPY 速度旋转逻辑未启用。
+- 仅修改感知专用 `src/PerceptiveTargetTrajectoriesPublisher.cpp`：线速度改为仅按 yaw 转到世界平面，目标 `v_z` 保持为零；前进、横移和转向控制均保留。
+- 未修改原始 `legged_control`、步态、世界模型或手柄代码。
+- 验证：`colcon build --base-paths /workspace/src --packages-select perceptive_legged_control --symlink-install` 构建通过；Gazebo 楼梯动态复测待执行。
+
+
+## 2026-06-09 15:22:11 UTC
+- 分析最新 `/workspace/mpc_logs/session_20260609_151416` 与 `session_20260609_151502`：yaw-only 速度投影已生效，但步态切换后仍出现不规则接触和侧翻。
+- 找到主要未对齐项：NACL 感知 controller 固定加载站立/行走 `reference.info`；当前 P1 仿真默认给感知 controller 加载 `reference_lie_down.info`，而感知 target publisher 使用站立 reference，导致 MPC 内部默认关节态 `1.35/-2.55` 与 locomotion 目标 `0.635/-1.188` 不一致。
+- 确认当前 `joy_control.py` 的 stand/lie_down 仍通过 MPC target 发布，并非独立位置控制器，因此感知 reference manager 必须保留目标自身的 0.20/0.58 相对高度。
+- 仅在感知包新增 `config/p1/reference.info`，并让 controller 配置和 target publisher 统一读取它。
+- 新增 `launch/perceptive_p1_sim.launch.py`，显式向原 P1 仿真传入感知 task、感知站立 reference 和 `perceptive_legged_control/PerceptiveLeggedController`；未修改原始 `legged_control`。
+- 高度适配由 `terrainZ + requestedHeight / cos(pitch)` 改为 `terrainZ + requestedHeight`：locomotion 对齐 NACL 的 `terrainZ + 0.58`，lie_down 保持 `terrainZ + 0.20`。
+- 验证：感知包构建通过；新增 launch Python 语法和 `ros2 launch ... --show-args` 解析通过。后续必须使用 `ros2 launch perceptive_legged_control perceptive_p1_sim.launch.py` 复测。
+- 尚存差异：零 `cmd_vel` 当前停止目标重发，日志会出现 `target_plan_expired`，后续需单独修复持续驻停参考。
+
+
+## 2026-06-09 15:27:02 UTC
+- 本轮仅分析最新 `/workspace/mpc_logs/session_20260609_152517`，未修改代码。
+- `mpc_time≈45-63s` 的爬楼阶段 roll 基本接近零；失稳从 `15:26:22` 的持续横向命令开始，`linear_y` 从约 `0.21m/s` 增长到接近 `0.50m/s`，同一秒 roll 超过 `0.35rad`，约 `0.2s` 后超过 `0.70rad`。
+- 失稳后实际接触 mode 从 `9/6` 扩散为多种异常组合。直楼梯宽度 `1.20m`、边界约 `y=±0.60m`，失稳开始时右侧足端已到约 `y=-0.66m`，超出台阶边界。
+- 对照 `session_20260609_152419`：机器人到达 `x=4.405m、base_z=1.748m` 时仍保持 mode `9`、roll≈-0.003rad，证明当前 reference/高度对齐后能够稳定爬楼一段距离。
+- `target_plan_expired` 不是本轮直接触发因素；失稳窗口内目标已持续更新且相对高度保持 `0.58m`。
+- 当前缺失的是楼梯通道或全身可行域保护：FootPlacement 只约束各足局部凸区域，不能阻止较大横移命令把机身/足端带出窄楼梯。为避免牺牲横移能力，本轮未直接限幅或禁用 `linear_y`。
+
+
+## 2026-06-09 15:33:19 UTC
+- 根据“落脚点先错、腿部随后紊乱”的判断，继续逐行对比 NACL。
+- 确认移植遗漏：NACL `PerceptiveLeggedPrecomputation::getPolygonConstraint()` 的 `polytopeB` 包含 `-0.04` 边缘内缩，当前实现此前没有，允许足端优化结果贴近凸平面/台阶边缘。
+- 仅修改感知包 `src/interface/PerceptiveLeggedPrecomputation.cpp`，恢复 NACL 的 `-0.04` 落脚安全余量。
+- 将感知 `config/p1/task.info` 中支撑相 FootPlacement CBF 对齐 NACL：`cbfLambda=1.0`、`cbfPenaltyDeltaParam=1e-4`。
+- SwingFootPlacementConstraintCBF 保持 NACL 当前实际位置约束公式，未启用参考源码中被注释的速度 CBF 形式。
+- 检查了当前 OCS2 SQP RequestSet：普通节点同时请求 `Constraint + SoftConstraint`，预计算刷新条件不是本轮直接根因，因此未修改。
+- 未修改原始 `legged_control`、手柄横移、世界模型或 base 高度公式。
+- 验证：`colcon build --base-paths /workspace/src --packages-select perceptive_legged_control --symlink-install` 构建通过；Gazebo/RViz 动态落脚复测待执行。
+
+
+## 2026-06-09 15:39:43 UTC
+- 分析最新 `/workspace/mpc_logs/session_20260609_153532` 与 `session_20260609_153617`。前者启动时已处于明显倾倒状态，不作为楼梯回归依据；后者仅有前进命令，在 `x≈1.16m` 首次接触台阶后 roll 快速超过 `0.35rad`，随后翻倒。
+- 确认直接回归来自上一轮照搬的原始 `polytopeB -= 0.04`：多边形半空间法向量未归一化，因此该值并不等于 4 cm 几何距离。
+- 对 0.30m 深的踏面，原始写法会在对应方向每侧内缩约 0.133m，使可落脚宽度仅剩约 0.033m，足端在第一阶几乎无可行区域。
+- 将感知包的落脚区域安全余量改为 `polytopeB -= 0.04 * ||A||`，并在统一半空间朝向后执行；现在不同边长的边界均对应真实 4 cm 内缩，0.30m 踏面保留约 0.22m 可落脚宽度。
+- 保留上一轮已与 NACL 对齐的 FootPlacement CBF 参数，未修改原始 `legged_control`、台阶世界、手柄或高度参考。
+- 验证：`colcon build --base-paths /workspace/src --packages-select perceptive_legged_control --symlink-install` 构建通过；需重新启动仿真后动态复测第一阶落脚。
+
+
+## 2026-06-09 15:52:56 UTC
+- 分析最新有效日志 `/workspace/mpc_logs/session_20260609_154610`：首个明显异常发生在 `mpc_time≈22.10s`，base 仅到 `x≈0.66m`，但前足已摆到 `x≈1.11m`，说明失稳由首个跨阶落脚过程触发，而不是机身撞上楼梯。
+- 失稳前计划接触模式为 trot 的 `9/6`，实际观测模式却从 `6` 突然扩散为 `14→0→1`；约 0.12s 后 roll/pitch 超过安全阈值，随后四足接触紊乱。
+- 对比此前能继续前进的日志，异常是在上一轮同时加入多边形内缩并将支撑相 CBF 从 `lambda=0.5, delta=0.005` 加强为 `lambda=1.0, delta=1e-4` 后出现。
+- 精确撤回上述三处回归：移除额外多边形内缩，恢复 `cbfLambda=0.5` 和 `cbfPenaltyDeltaParam=0.005`。
+- 保留 `enableCBF=true`、`enableSwingCBF=true`、`enablefootCollision=true`，没有关闭或牺牲感知 MPC 功能，也未修改原始 `legged_control`。
+- 验证：`colcon build --base-paths /workspace/src --packages-select perceptive_legged_control --symlink-install` 构建通过；需要完整重启仿真后复测首个跨阶接触模式是否保持 `9/6`。
+
+
+## 2026-06-09 16:04:18 UTC
+- 用户复测反馈：撤回额外多边形内缩，并恢复支撑相 CBF `lambda=0.5、delta=0.005` 后，楼梯表现“好很多”。
+- 该结果支持此前判断：首阶直接失稳主要由过强的新增落脚约束触发。
+- 本轮不继续修改参数，保持当前感知约束启用状态；后续依据新日志定位更高台阶处最早出现的足端、接触模式或姿态偏差。
+
+
+## 2026-06-09 16:09:26 UTC
+- 按用户要求重新加入落脚多边形额外内缩，但不恢复上一轮过强的 CBF 参数，以便单独验证几何边距。
+- 在半空间方向统一后使用 `polytopeB(i) -= 0.04 * polytopeA.row(i).norm()`，表示与边长无关的真实 4 cm 内缩；没有使用尺度相关的原始常数减法。
+- 支撑相 CBF 保持已改善稳定性的 `cbfLambda=0.5`、`cbfPenaltyDeltaParam=0.005`；Swing CBF、FootCollision 及其他感知功能均保持启用。
+- 验证：`colcon build --base-paths /workspace/src --packages-select perceptive_legged_control --symlink-install` 构建通过。下一轮复测用于隔离判断 4 cm 内缩本身是否影响首阶接触模式。
+
+
+## 2026-06-09 16:13:26 UTC
+- 用户单变量复测反馈：保持 `cbfLambda=0.5、cbfPenaltyDeltaParam=0.005` 不变，仅重新加入归一化 4 cm 多边形内缩后，楼梯表现再次变差。
+- A/B 结果确认固定 4 cm 内缩本身不适合当前 P1 的 0.30m 台阶踏面、凸区域分割与步幅组合。
+- 已再次移除 `polytopeB(i) -= 0.04 * polytopeA.row(i).norm()`，恢复此前表现“好很多”的无额外内缩版本。
+- FootPlacement CBF、Swing CBF、FootCollision 均继续启用，CBF 参数保持 `0.5/0.005`，未修改原始 `legged_control`。
+- 感知包重新构建通过。后续如需边缘余量，应基于区域尺寸设计自适应内缩并单独验证，不再使用固定 4 cm。
+
+
+## 2026-06-09 16:18:25 UTC
+- 分析最新 30 度楼梯日志 `/workspace/mpc_logs/session_20260609_161402`。机器人已爬到 `x≈3.26m、base_z≈1.88m`，并非接触第一阶即停止。
+- 停止前实际 pitch 约 `-0.524rad`，符合 30 度地形；`SafetyChecker` 只检查 roll 是否超过 ±90 度，因此不是 30 度姿态被安全阈值误杀，而是翻倒后才触发停止。
+- 最早失稳表现为计划模式仍为 trot `9/6`，实际接触模式在 `mpc_time≈40.36s` 从 `9` 突变为 `1→5→7`，随后 pitch/roll 和垂向速度发散。
+- 当前机身参考使用 `terrainZ + requestedRelativeHeight`。机身跟随 30 度 pitch 后，0.58m 竖直高度只对应约 `0.58*cos(30°)=0.502m` 法向离地距离，比平地少约 0.078m，导致腿部压缩、工作空间和接触裕量下降。
+- 对照 `legged_perceptive` 原版，其使用 `terrain + comHeight / cos(pitch)`；NACL 修改版将 `/cos(pitch)` 注释掉，当前实现与后者一致。30 度离散台阶比低坡度更容易暴露这一差异。
+- 本轮仅完成原因诊断，未修改代码。建议下一步在感知 reference manager 中恢复带保护上限的坡度高度补偿，并单独复测 lie_down 与楼梯。
+
+
+## 2026-06-09 16:19:29 UTC
+- 用户询问 30 度楼梯高度公式是否需要对齐。建议对齐 `legged_perceptive` 原版的坡面法向高度保持逻辑，即 locomotion 使用 `terrainZ + comHeight / cos(pitch)`。
+- 不建议无条件应用到所有目标：`lie_down` 的 0.20m 相对高度应继续使用 `terrainZ + requestedHeight`，避免坡面趴下姿态被额外抬高。
+- 该选择基于最新日志中 30 度时法向离地高度损失约 7.8cm、随后接触模式崩溃的证据；本轮仅确定修改方向，未改代码。
+
+
+## 2026-06-09 16:20:17 UTC
+- 按确认方案对齐 `legged_perceptive` 原版的坡面法向高度保持逻辑，但仅应用于站立/行走目标。
+- `PerceptiveSwitchedModelReferenceManager` 依据整条目标轨迹的最终相对高度区分模式：最终高度接近 `locomotionComHeight=0.58m` 时启用坡度补偿；最终高度为 lie_down 的 `0.20m` 时不补偿。
+- locomotion 高度改为 `terrainZ + requestedRelativeHeight / max(cos(pitch), 0.5)`。30 度时 0.58m 对应约 0.670m 竖直高度，从而保持约 0.58m 的坡面法向间距。
+- lie_down 继续使用 `terrainZ + requestedRelativeHeight`，避免坡面趴下目标被额外抬高。
+- 未修改原始 `legged_control`、步态、手柄、落脚约束或碰撞约束。
+- 验证：`colcon build --base-paths /workspace/src --packages-select perceptive_legged_control --symlink-install` 构建通过；动态复测需覆盖 30 度连续爬升和坡面 lie_down。

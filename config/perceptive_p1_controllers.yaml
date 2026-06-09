@@ -15,3 +15,4 @@ perceptive_legged_controller:
     perceptive_height_layer: smooth_planar
     perceptive_height_offset: 0.0
     taskFile: /workspace/src/perceptive_legged_control/perceptive_legged_control/config/p1/task.info
+    referenceFile: /workspace/install/perceptive_legged_control/share/perceptive_legged_control/config/p1/reference.info

@@ -17,12 +17,12 @@ using namespace ocs2::legged_robot;
 PerceptiveSwitchedModelReferenceManager::PerceptiveSwitchedModelReferenceManager(
     CentroidalModelInfo info, std::shared_ptr<GaitSchedule> gaitSchedulePtr, std::shared_ptr<SwingTrajectoryPlanner> swingTrajectoryPtr,
     std::shared_ptr<ConvexRegionSelector> convexRegionSelectorPtr, const EndEffectorKinematics<scalar_t>& endEffectorKinematics,
-    scalar_t comHeight)
+    scalar_t locomotionComHeight)
     : SwitchedModelReferenceManager(std::move(gaitSchedulePtr), std::move(swingTrajectoryPtr)),
       info_(std::move(info)),
       convexRegionSelectorPtr_(std::move(convexRegionSelectorPtr)),
       endEffectorKinematicsPtr_(endEffectorKinematics.clone()),
-      comHeight_(comHeight) {
+      locomotionComHeight_(locomotionComHeight) {
   lastLiftoffPos_.fill(vector3_t::Zero());
 }
 
@@ -42,6 +42,9 @@ void PerceptiveSwitchedModelReferenceManager::modifyReferences(scalar_t initTime
     }
 
     TargetTrajectories newTargetTrajectories;
+    const scalar_t finalRelativeHeight =
+        centroidal_model::getBasePose(relativeTargetTrajectories->getDesiredState(finalTime), info_)(2);
+    const bool compensateLocomotionHeight = finalRelativeHeight >= 0.9 * locomotionComHeight_;
     const size_t nodeNum = 11;
     for (size_t i = 0; i < nodeNum; ++i) {
       const scalar_t time = initTime + static_cast<scalar_t>(i) * timeHorizon / static_cast<scalar_t>(nodeNum - 1);
@@ -67,8 +70,12 @@ void PerceptiveSwitchedModelReferenceManager::modifyReferences(scalar_t initTime
       const scalar_t yaw = centroidal_model::getBasePose(state, info_)(3);
       R << std::cos(yaw), -std::sin(yaw), 0.0, std::sin(yaw), std::cos(yaw), 0.0, 0.0, 0.0, 1.0;
       const vector3_t bodyNormal = R.transpose() * normalVector;
-      centroidal_model::getBasePose(state, info_)(4) = std::atan2(bodyNormal.x(), bodyNormal.z());
-      centroidal_model::getBasePose(state, info_)(2) = terrainZ + pos.z();
+      const scalar_t pitch = std::atan2(bodyNormal.x(), bodyNormal.z());
+      const scalar_t requestedRelativeHeight =
+          std::isfinite(pos.z()) && pos.z() > 0.0 ? pos.z() : locomotionComHeight_;
+      centroidal_model::getBasePose(state, info_)(4) = pitch;
+      const scalar_t heightScale = compensateLocomotionHeight ? 1.0 / std::max(std::cos(pitch), 0.5) : 1.0;
+      centroidal_model::getBasePose(state, info_)(2) = terrainZ + requestedRelativeHeight * heightScale;
 
       newTargetTrajectories.timeTrajectory.push_back(time);
       newTargetTrajectories.stateTrajectory.push_back(state);
