@@ -323,14 +323,14 @@ kalmanFilter
 footPlacement
 {
   enable                                  true
-  enableCBF                               true
+  enableCBF                               false
   cbfLambda                               0.5
   cbfPenaltyMuParam                       1e-2
   cbfPenaltyDeltaParam                    0.005
   statePenaltyMuParam                     1e-2
   statePenaltyDeltaParam                  1e-4
 
-  enableSwingCBF                          true
+  enableSwingCBF                          false
   swingcbfLambda                          1.0
   swingcbfPenaltyMuParam                  1e-2
   swingcbfPenaltyDeltaParam               1e-2
