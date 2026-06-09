@@ -21,7 +21,7 @@ class PerceptiveSwitchedModelReferenceManager : public ocs2::legged_robot::Switc
                                           std::shared_ptr<ocs2::legged_robot::SwingTrajectoryPlanner> swingTrajectoryPtr,
                                           std::shared_ptr<ConvexRegionSelector> convexRegionSelectorPtr,
                                           const ocs2::EndEffectorKinematics<ocs2::scalar_t>& endEffectorKinematics,
-                                          ocs2::scalar_t comHeight);
+                                          ocs2::scalar_t comHeight, ocs2::scalar_t swingHeightAlongLineScale = 1.0);
 
   const std::shared_ptr<ConvexRegionSelector>& getConvexRegionSelectorPtr() const { return convexRegionSelectorPtr_; }
   ocs2::legged_robot::contact_flag_t getFootPlacementFlags(ocs2::scalar_t time) const;
@@ -55,6 +55,7 @@ class PerceptiveSwitchedModelReferenceManager : public ocs2::legged_robot::Switc
   std::shared_ptr<ConvexRegionSelector> convexRegionSelectorPtr_;
   std::unique_ptr<ocs2::EndEffectorKinematics<ocs2::scalar_t>> endEffectorKinematicsPtr_;
   ocs2::scalar_t comHeight_;
+  ocs2::scalar_t swingHeightAlongLineScale_{1.0};
   ocs2::TargetTrajectories relativeTargetTrajectories_;
   ocs2::TargetTrajectories lastAdaptedTargetTrajectories_;
   bool hasCachedTargetTrajectories_{false};

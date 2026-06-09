@@ -149,9 +149,15 @@ void PerceptiveLeggedInterface::setupReferenceManager(const std::string& taskFil
 
   ocs2::scalar_t comHeight = 0.0;
   ocs2::loadData::loadCppDataType(referenceFile, "comHeight", comHeight);
+  ocs2::scalar_t swingHeightAlongLineScale = 1.0;
+  {
+    boost::property_tree::ptree pt;
+    boost::property_tree::read_info(taskFile, pt);
+    ocs2::loadData::loadPtreeValue(pt, swingHeightAlongLineScale, "swing_trajectory_config.swingHeightAlongLineScale", verbose);
+  }
   referenceManagerPtr_ = std::make_shared<PerceptiveSwitchedModelReferenceManager>(
       centroidalModelInfo_, loadGaitSchedule(referenceFile, verbose), std::move(swingTrajectoryPlanner), std::move(convexRegionSelector),
-      *eeKinematicsPtr, comHeight);
+      *eeKinematicsPtr, comHeight, swingHeightAlongLineScale);
 }
 
 void PerceptiveLeggedInterface::setupPreComputation(const std::string&, const std::string&, const std::string&, bool) {

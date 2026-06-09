@@ -22,6 +22,7 @@ swing_trajectory_config
   touchDownVelocity            -0.1
   swingHeight                   0.18
   swingTimeScale                0.15
+  swingHeightAlongLineScale     1.0
 }
 
 ; DDP settings

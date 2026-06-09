@@ -1059,3 +1059,166 @@ colcon build --packages-select ocs2_mpc perceptive_legged_control p1_dds_joy_too
 ### 使用建议
 
 爬楼梯时保持 trot 步态并持续给前进速度；若仍偶发摔倒，可尝试放慢 `velocity_x` 或把 `command_horizon_scale` 调到 `3.0`。
+
+## 2026-06-09 19:05:00 CST
+
+### 问题：站在楼梯上会抖
+
+`session_20260609_094134` 分析：hold 以 20 Hz 用实时 `currentRelativeHeight` 更新目标 z，机身轻微弹跳会被目标追逐放大（`mpc_target` start_z 波动大），表现为站立抖动。
+
+### 修改
+
+`PerceptiveTargetTrajectoriesPublisher.cpp`：
+
+- 松杆进入 hold 时调用 `latchHoldRelativeHeight()` 锁定相对高度。
+- hold 重发期间 `targetPose(2)` 与 `poseToTargetTrajectories` 起点 z 均使用 `holdRelativeHeight_`，不再每帧读观测高度。
+- 非零 `cmd_vel` 时清除锁定。
+
+### 验证与使用
+
+```bash
+colcon build --packages-select perceptive_legged_control
+```
+
+坡上停稳：先减速 → 切 **stance (gait_id=0)** → 再松杆；trot 零速仍会周期摆腿，不如 stance 稳。
+
+## 2026-06-09 19:20:00 CST
+
+### 日志：`session_20260609_094732`
+
+- 场景：20° 楼梯（`base_y≈1.8`），爬至 `z≈1.83m`，`t≈39.6s` 摔倒（`roll≈0.79`，`vz≈-1.69`）。
+- 抖动：高位零速段 `t=36–39s`，`vcom_z` std≈0.34，最大约 0.87；低位 `t=24–27s`（`z≈0.61`）vz_std≈0.02。
+- `cmd_vel`：站立段约一半为零速，但仍有 `linear_y` 尖峰（最大约 0.5），导致 `y` 从 1.75 漂到 1.29。
+- `mpc_target`：`start_z` 在 t=36.0–36.9s 维持 0.644464，t=38.36–38.81s 维持 0.642008，但 37–39s 仍有阶跃（0.66→0.58→0.36），需确认 latch 补丁是否已编译部署。
+- `events.log`：仅启动后 2 次 `target_plan_expired`，hold 续发基本正常。
+
+## 2026-06-09 19:35:00 CST
+
+### 日志：`session_20260609_095217`（latch 复测）
+
+- 场景：26° 灰楼梯（`y≈0`），爬至 `z≈2.23m`，时长 64s。
+- **高度 latch 生效**：`mpc_target` `start_z=0.564726` 在 t=48–53s 连续 24 次不变；整体 `start_z` std=0.049（对比 `094732` 的 0.49）。
+- **高位站立改善**：零速段 t=48–56s，`vcom_z` std≈0.09，`|roll|max≈0.036`，`pitch≈-0.44` 稳定。
+- **摔倒原因**：t≥56s 出现后退 `linear_x<0`（该段零速仅 33%），机器人从楼梯顶端向后滑落，t≈60.4s `roll≈-0.93`；非站立抖动直接导致。
+- 建议：楼梯顶端停稳后避免后退指令；`linear_y` 全程为 0，表现良好。
+
+## 2026-06-09 19:50:00 CST
+
+### 用户反馈：越来越差
+
+跨 session 对比：`084930`（30° 成功 z=2.87m）、`095626`（30° z=2.72m 站 25s roll<0.02 后因 `angular_z` 摔）、`095744`（摇杆横向/后退/转向摔）。爬升与站立能力并未单调变差；摔倒多由**微小摇杆输入打断 hold** 引起。
+
+### 修改
+
+- `PerceptiveTargetTrajectoriesPublisher`：hold 死区（`hold_linear_deadzone=0.08`、`hold_angular_deadzone=0.2`）；进入 hold 锁定 x/y/yaw/相对高度；死区内保持 hold 不响应转向/微移。
+- `task.info`：`swingHeight` 0.17→0.18，`touchDownVelocity` -0.05→-0.1（恢复更稳摆腿参数）。
+- launch 新增 `hold_linear_deadzone`、`hold_angular_deadzone` 参数。
+
+
+2026-06-09 14:32:25 CST - 用户说明代码运行在容器里；本轮未进行代码修改。
+2026-06-09 14:33:36 CST - 用户说明 `src/perceptive_legged_control` 是感知 MPC 代码目录；本轮未进行源码修改。
+2026-06-09 14:39:38 CST - 对比 `src/perceptive_legged_control` 与 `legged_perceptive`、`nacl` 的感知 MPC 逻辑；未修改源码。结论：当前包已移植 terrain receiver、perceptive reference manager、convex region selector、foot placement、foot collision、CBF/SDF 相关结构；按当前 `config/p1/task.info` 实际启用 foot placement 和 foot collision，FootPlacement CBF、SwingFootPlacement CBF、SphereSDF 当前为关闭。
+## 2026-06-09 14:41:40 CST 
+   - 补充发现：`PerceptiveTerrainBuffer` 仍在 `CMakeLists.txt` 中编译，但当前 controller 主链路使用 `PlanarTerrainReceiver`；`perceptive_p1_controllers.yaml` 中的 `perceptive_height_layer` 和 `perceptive_height_offset` 对当前主链路没有直接作用。
+   当前主链路
+   PerceptiveLeggedController 替换成 PerceptiveLeggedInterface，并在 MPC solver
+   里加入 PlanarTerrainReceiver 同步模块：src/perceptive_legged_control/src/
+   controller/PerceptiveLeggedController.cpp:11。
+   PlanarTerrainReceiver 订阅 /convex_plane_decomposition_ros/planar_terrain，在
+   preSolverRun() 把新地形写进 MPC 共享 terrain，并更新 SDF：src/
+   perceptive_legged_control/src/synchronized_module/
+   PlanarTerrainReceiver.cpp:24。
+   PerceptiveLeggedInterface 初始化平地 fallback，然后添加 foot placement、CBF、
+   collision、可选 SphereSDF 约束：src/perceptive_legged_control/src/interface/
+   PerceptiveLeggedInterface.cpp:40。
+   PerceptiveSwitchedModelReferenceManager 会按地形修正 base pitch/z、更新凸区域
+   foothold，并给 swing planner 传 lift-off/touch-down/swing max height：src/
+   perceptive_legged_control/src/interface/
+   PerceptiveSwitchedModelReferenceManager.cpp:29。
+
+   和 legged_perceptive 比
+   结构基本来自它：controller、terrain receiver、perceptive interface、reference
+   manager、convex region selector、precomputation 都是一一对应。
+   但 legged_perceptive 原版主要默认接了 FootPlacementConstraint 和
+   FootCollisionConstraint，SphereSDF 创建了但没加进 problem：legged_perceptive/
+   legged_perceptive_interface/src/PerceptiveLeggedInterface.cpp:51。它也没有
+   nacl 后续的 FootPlacement CBF、SwingFootPlacement CBF、沿地形连线取 swing max
+   height 这些逻辑。
+
+   和 nacl 比
+   当前代码更接近 nacl：已经移植了 FootPlacement CBF、SwingFootPlacement CBF、配
+   置读取、foot collision、可选 SphereSDF，以及 swing 最高点沿 elevation 连线取最
+   大值再乘 1.05 的逻辑。对应 nacl 在这里：nacl/perceptive_legged_control/
+   OCS2_ws/src/legged_perceptive/legged_perceptive_interface/src/
+   PerceptiveLeggedInterface.cpp:24、nacl/perceptive_legged_control/OCS2_ws/src/
+   legged_perceptive/legged_perceptive_interface/src/
+   PerceptiveLeggedReferenceManager.cpp:75。
+
+   关键差异有三点：
+
+   1. 当前配置实际没有启用 CBF：enableCBF false、enableSwingCBF false，只启用
+      footPlacement 和 footCollision：src/perceptive_legged_control/config/p1/
+      task.info:323。nacl 的 aliengo 配置里 enableCBF true，enableSwingCBF
+      false：nacl/perceptive_legged_control/OCS2_ws/src/legged_perceptive/
+      legged_perceptive_controllers/config/aliengo/task.info:309。
+
+   2. 当前 SwingFootPlacement CBF 激活条件比 nacl 保守。nacl 约束类里基本是摆动相
+      就激活；当前通过 getSwingFootPlacementFlags() 还要求过了初始支撑结束时间：
+      src/perceptive_legged_control/src/constraint/
+      SwingFootPlacementConstraintCBF.cpp:29。
+
+   3. 当前 ROS 2 包多了 perceptive_target_trajectories_publisher，它会根据地形高
+      度生成 /cmd_vel 和 /move_base_simple/goal 的 target trajectories：src/
+      perceptive_legged_control/src/
+      PerceptiveTargetTrajectoriesPublisher.cpp:35。这是当前工程自己的上层目标适
+      配链路，不是 nacl/legged_perceptive 的 solver 内部逻辑。
+
+   另外有个小风险点：perceptive_p1_controllers.yaml 里的 perceptive_height_layer
+   和 perceptive_height_offset 当前主链路不读取；它们对应的是仍在编译但主链路未使
+   用的 PerceptiveTerrainBuffer。当前 controller 实际读取的是
+   perceptive_terrain_topic 和 perceptive_sdf_elevation_layer
+
+## 2026-06-09 15:10:00 CST - 
+   在 `legged_gazebo/worlds/empty_world.world` 新增 30° 坡楼梯模型 `stairs_30deg`：17 级、踏步深 0.30 m、级高 0.173 m（tan30°）、宽度 2.0 m（原楼梯 1.2 m），位置 y=-1.80（与 y=0 灰楼梯、y=1.80 蓝 20° 楼梯平行）。已 `colcon build --packages-select legged_gazebo`；需重启仿真 launch 生效。
+
+## 2026-06-09 15:35:00 CST 
+   - 新增感知仿真会话日志：`perceptive_legged_control` 包内 `perceptive_session_logger` 节点，启动后在 `log_dir/session_YYYYMMDD_HHMMSS/` 写入 `events.log`、`observation.csv`、`cmd_vel.log`、`mode_schedule.log`、`rosout.log`；`events.log` 会在 MPC target 过期时记录 `target_plan_expired`。`p1_perceptive_gait_bridge_sim_test.launch.py` 默认 `enable_session_logger:=true`、`log_dir:=/workspace/logs`。
+
+## 2026-06-09 16:20:00 CST 
+   - 修复并扩展 `perceptive_session_logger`：`mpc_target.log` 现记录每次 target 的起止 base 位姿与 12 关节角；新增 `mpc_target_trajectory.csv` 记录 target 各节点轨迹；`observation.csv` 扩展 12 关节角与 4 足端在 `odom` 下的位置（TF：`LF_FOOT`/`LH_FOOT`/`RF_FOOT`/`RH_FOOT`）。需 `colcon build --packages-select perceptive_legged_control` 后重启 launch。
+
+## 2026-06-09 16:45:00 CST 
+   - Logger 二次修复：修正 `mpc_target.log` 关节列 CSV 错位；`mpc_target`/`mpc_target_trajectory` 内容去重 + 默认 5Hz 上限；`cmd_vel` 默认 20Hz 采样；`rosout` 默认仅 WARN 及以上（`rosout_log_rate_hz:=0`）；`target_plan_expired` 按 `target_final_time` 去重。Launch 新增 `mpc_target_log_rate_hz`、`cmd_vel_log_rate_hz`、`rosout_log_rate_hz` 参数。
+
+## 2026-06-09 17:10:00 CST 
+   - 实现零速 hold target（P0）：`PerceptiveTargetTrajectoriesPublisher` 在收到零 `cmd_vel` 后进入 `holdTargetActive_` 模式，按当前位姿 + 地形高度发布零速 target，并由 `target_republish_rate` 定时器持续刷新，避免松杆后 MPC 规划过期。新增参数 `hold_target_on_zero_vel`（默认 true）；`p1_perceptive_gait_bridge_sim_test.launch.py` 已透传。需 `colcon build --packages-select perceptive_legged_control` 后重启 launch。
+
+## 2026-06-09 17:25:00 CST 
+   - 日志验证 hold target：`session_20260609_084930`（修后）约 81s、爬至 z=2.87m（30° 楼梯），`events.log` 无 `target_plan_expired`，无侧翻（|roll|max=0.33），t≈45s 在 z≈2.84m 近零速站稳；`mpc_target` 持续刷新至 t=80s。对比 `session_20260609_083654`（修前）：3 次 plan 过期、roll→1.57 侧翻。`session_20260609_084759` 为短测仍有 2 次早期过期（可能未重编译或起步站立）。
+
+## 2026-06-09 17:40:00 CST 
+   - 坡上高度补偿：`PerceptiveSwitchedModelReferenceManager` 将 `terrainZ + pos.z()` 改为 `terrainZ + pos.z()/cos(pitch)`；publisher 改为平地名义高度编码。
+
+## 2026-06-09 17:55:00 CST 
+   - 坡上高度补偿已回退：`session_20260609_090355` 验证失败（z 仅至 1.2m 即侧翻，|pitch|≈1.07，|vz|≈1.9）。根因：地形 pitch 在平地/台阶棱处有噪声，`/cos` 放大目标高度；hold 与运动混用 `currentRelative*cos` 在动态 pitch 下不稳定。已恢复 `terrainZ + pos.z()` 与 `max(currentRelative, comHeight)`，零速 hold target 保留。后续建议：`|pitch|>0.35rad` 才补偿；hold 发 `comHeight` 名义值；统一 controller/publisher 的 comHeight。
+
+## 2026-06-09 18:10:00 CST 
+   - 减摆腿冲击：`maxHeightAlongLine×1.05` 改为可配置 `swingHeightAlongLineScale`（默认 1.0）；`task.info` 中 `swingHeight` 0.18→0.15、`touchDownVelocity` -0.1→-0.05。需 `colcon build --packages-select perceptive_legged_control` 后重启 launch 再测 30° 楼梯。
+
+## 2026-06-09 18:30:00 CST 
+   - 日志分析 `session_20260609_092929`（30° 楼梯摔倒）：仅爬至 z≈1.9m（成功会话 `084930` 达 2.87m）。t≈40s 仍稳（y≈-1.66，pitch≈-0.51）；t≈44s 横向漂移至 y≈-1.35 且 `vcom_x≈0.83`；t≈45s roll→-0.59、vz→-1.12；t≈46s 侧翻 roll≈-1.52。`cmd_vel` 存在持续 `linear_y`（最大约 -0.44），为偏离楼梯中心 y≈-1.8 的主因。操作：30° 楼梯保持 `linear_y=0`、放慢 `linear.x`。
+
+## 2026-06-09 18:45:00 CST 
+   - 修复坡上 trot 零速站立：hold 模式改用当前地形相对高度 `currentRelativeHeight`（不再 `max(..., comHeight)` 把机身往平地高度拉）；`swingHeight` 0.15→0.17 改善 trot 落脚 clearance。需 `colcon build --packages-select perceptive_legged_control` 后重启 launch。
+
+## 2026-06-09 19:05:00 CST 
+   - 修复楼梯站立抖动：`PerceptiveTargetTrajectoriesPublisher` 在松杆进入 hold 时锁定 `holdRelativeHeight_`，20 Hz 重发不再每帧追踪带噪声的 `currentRelativeHeight`（避免目标高度随弹跳正反馈振荡）；轨迹起点 z 与目标 z 使用同一锁定值。操作：坡上停稳建议切 **stance** 再松杆；trot 零速仍会交替摆腿。需 `colcon build --packages-select perceptive_legged_control` 后重启 launch。
+
+## 2026-06-09 19:20:00 CST 
+   - 日志分析 `session_20260609_094732`（20° 楼梯 y≈1.8，约 40s 后摔倒）：t=24–27s 低位（z≈0.61）vz_std≈0.02 较稳；t=36–39s 高位（z≈1.76）零速站立 vz_std≈0.34、|vz|≈0.87，机身上下抖。`cmd_vel` 在“站立”段并非全零（约 50% 零速，仍有 `linear_y` 最大约 0.5），y 从 1.75 漂到 1.29 偏离楼梯中心；t≈39.6s roll→0.79、vz→-1.69 侧翻。`mpc_target` start_z 在 t=36–38s 有 0.644/0.642 平台但仍阶跃变化，需确认是否已编译高度锁定补丁。建议：20° 楼梯保持 `linear_y=0`、高位先切 stance 再松杆、编译 latch 后复测。
+
+## 2026-06-09 19:35:00 CST 
+   - 日志分析 `session_20260609_095217`（26° 灰楼梯 y≈0，64s）：高度 latch 已生效——`start_z=0.564726` 连续锁定 24+ 次发布；高位零速站 `t=48–56s`（z≈2.23m）vz_std≈0.09、|roll|max≈0.036，抖动较 `094732` 明显改善。摔倒发生在 `t≈56s` 后：用户给了后退 `linear_x<0`（零速仅 33%），x 从 4.37 退回 3.3、y 漂至 0.7，从楼梯顶端滑落，`t≈60.4s` roll→-0.93。操作：楼梯顶端停稳后勿给后退速度；`linear_y=0` 保持较好。
+
+## 2026-06-09 19:50:00 CST 
+   - 用户反馈“越来越差”；对比 `084930`/`095217`/`095626`/`095744`：`095626` 在 30° 楼梯 z=2.63m 零速站稳 25s（roll<0.02），`t=64.7s` 因 `angular_z≈0.37` 退出 hold 摔倒；`095744` 因 `linear_y`、后退 `linear_x`、`angular_z` 偏离楼梯。根因：微小摇杆输入会打断 hold。修复：hold 死区（默认线速度 0.08、角速度 0.2）；hold 锁定 x/y/yaw/z；`swingHeight` 恢复 0.18、`touchDownVelocity` 恢复 -0.1。需 `colcon build --packages-select perceptive_legged_control p1_dds_joy_tools_assets` 后重启 launch。

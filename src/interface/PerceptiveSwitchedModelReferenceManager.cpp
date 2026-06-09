@@ -17,12 +17,13 @@ using namespace ocs2::legged_robot;
 PerceptiveSwitchedModelReferenceManager::PerceptiveSwitchedModelReferenceManager(
     CentroidalModelInfo info, std::shared_ptr<GaitSchedule> gaitSchedulePtr, std::shared_ptr<SwingTrajectoryPlanner> swingTrajectoryPtr,
     std::shared_ptr<ConvexRegionSelector> convexRegionSelectorPtr, const EndEffectorKinematics<scalar_t>& endEffectorKinematics,
-    scalar_t comHeight)
+    scalar_t comHeight, scalar_t swingHeightAlongLineScale)
     : SwitchedModelReferenceManager(std::move(gaitSchedulePtr), std::move(swingTrajectoryPtr)),
       info_(std::move(info)),
       convexRegionSelectorPtr_(std::move(convexRegionSelectorPtr)),
       endEffectorKinematicsPtr_(endEffectorKinematics.clone()),
-      comHeight_(comHeight) {
+      comHeight_(comHeight),
+      swingHeightAlongLineScale_(swingHeightAlongLineScale) {
   lastLiftoffPos_.fill(vector3_t::Zero());
 }
 
@@ -163,7 +164,7 @@ std::tuple<scalar_array_t, scalar_array_t, scalar_array_t> PerceptiveSwitchedMod
     if (!contactFlagStocks[i]) {
       const scalar_t fallback = std::max(liftOffHeights[i], touchDownHeights[i]);
       const scalar_t maxHeight = maxHeightAlongLine(map, liftOffProjections[i].head(2), touchDownProjections[i].head(2), fallback);
-      swingHeights[i] = maxHeight * 1.05;
+      swingHeights[i] = maxHeight * swingHeightAlongLineScale_;
     } else {
       swingHeights[i] = projections[i].positionInWorld.z();
     }
