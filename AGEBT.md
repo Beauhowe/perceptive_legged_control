@@ -1059,3 +1059,30 @@ colcon build --packages-select ocs2_mpc perceptive_legged_control p1_dds_joy_too
 ### 使用建议
 
 爬楼梯时保持 trot 步态并持续给前进速度；若仍偶发摔倒，可尝试放慢 `velocity_x` 或把 `command_horizon_scale` 调到 `3.0`。
+
+
+## 2026-06-09 13:45:15 UTC
+
+读取最新 `/workspace/mpc_logs/session_20260609_134002` 日志，分析爬楼梯不稳定和摔倒原因；本次未修改控制代码。
+
+### 诊断摘要
+
+- `observation.csv` 显示摔倒前机身高度与目标高度明显脱节：观测 `base_z` 在 `mpc_time=52.38s` 达到约 `2.19m`，但 `mpc_target_trajectory.csv` 目标 `base_z` 最大只有约 `0.66m`。
+- `mpc_time=56.75s` 时姿态已严重失控：roll 约 `89.8deg`，pitch 约 `73.9deg`，`base_z` 掉到约 `0.46m`，随后 `rosout.log` 反复出现 `[Legged Controller] Safety check failed`。
+- `cmd_vel.log` 中最大前进速度约 `0.43m/s`、最大角速度约 `1.02rad/s`，不像是单纯速度过大导致，而是地形/目标高度和实际楼梯高度没有对齐。
+- `events.log` 仍出现 `target_plan_expired`，说明目标轨迹仍有过期窗口，需要继续关注目标重发和 MPC 参考有效期。
+
+### 初步判断
+
+爬楼梯不稳定的主要原因是感知地形/目标轨迹没有正确把楼梯高度反映到 MPC 目标中，控制器在实际身体已经爬高时仍按接近平地的 `base_z` 和零 pitch/roll 规划，导致大高度误差、俯仰持续增大，最终触发安全检查并摔倒。
+
+
+## 2026-06-09 13:47:44 UTC
+
+回答“是否代码层面问题”的判断；本次只读检查目标发布器和感知参考管理代码，未修改控制代码。
+
+### 判断
+
+这更像代码/集成层面的问题，而不是单纯速度或参数问题。`PerceptiveTargetTrajectoriesPublisher` 发布的 cmd_vel 目标高度是相对地形高度，后续需要 `PerceptiveSwitchedModelReferenceManager` 根据 `smooth_planar`/`elevation` 地形图再补成绝对高度和坡面 pitch。如果控制器端没有收到有效地形、地形 frame/layer 不匹配、或地形高度没有覆盖楼梯区域，MPC 就会继续使用接近平地的目标高度，导致实际楼梯高度和目标高度脱节。
+
+需要优先排查目标发布器、地形 topic/layer/frame、控制器内 reference adaptation 是否都在同一坐标系和同一高度语义下工作。
